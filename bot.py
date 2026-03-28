@@ -37,7 +37,7 @@ def run_web():
 # --- БОТ ---
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
-router = Router() # Создаем роутер для безопасной регистрации
+router = Router()
 
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
@@ -56,14 +56,13 @@ async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         kb.row(types.InlineKeyboardButton(text="⚙️ Админка", callback_data="admin"))
     
-    await message.answer(f"👋 <b>PeerSpy v3.8</b>\n\nМониторинг бизнес-аккаунта запущен.", reply_markup=kb.as_markup())
+    await message.answer(f"👋 <b>PeerSpy v3.8</b>\n\nБизнес-мониторинг активен.", reply_markup=kb.as_markup())
 
 async def biz_msg_handler(message: types.Message):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     txt = message.text or message.caption or "[Медиа]"
     
-    # Логика для правок: проверяем старый текст
     cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(message.message_id),))
     old = cur.fetchone()
     if old and old[0] != txt:
@@ -73,7 +72,6 @@ async def biz_msg_handler(message: types.Message):
     conn.commit()
     conn.close()
 
-    # Перехват фото
     if message.reply_to_message and message.reply_to_message.photo:
         f_id = message.reply_to_message.photo[-1].file_id
         async with aiohttp.ClientSession() as s:
@@ -94,26 +92,42 @@ async def biz_delete_handler(event: types.BusinessMessagesDeleted):
             await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n{res[0]}")
     conn.close()
 
-# --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ (МЕТОД .REGISTER) ---
-router.message.register(cmd_start, Command("start"))
-router.business_message.register(biz_msg_handler)
-router.business_edited_message.register(biz_msg_handler)
-router.business_deleted_messages.register(biz_delete_handler)
-
-# --- CALLBACKS И АДМИНКА ---
-@router.callback_query(F.data == "help")
+# --- CALLBACKS ---
 async def h_cb(c: types.CallbackQuery):
     await c.message.answer("Инструкция: Настройки -> Business -> Чат-боты."); await c.answer()
 
-@router.callback_query(F.data == "admin")
 async def adm_cb(c: types.CallbackQuery):
     conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT COUNT(*) FROM users"); count = cur.fetchone()[0]; conn.close()
     b = InlineKeyboardBuilder(); b.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="bc"))
     await c.message.answer(f"Юзеров: {count}", reply_markup=b.as_markup()); await c.answer()
 
-@router.callback_query(F.data == "bc")
 async def bc_s(c: types.CallbackQuery, state: FSMContext):
     await c.message.answer("Пиши текст:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
 
-@router.message(AdminStates.waiting_for_broadcast)
 async def bc_f(m: types.Message, state: FSMContext):
+    conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT user_id FROM users"); users = cur.fetchall(); conn.close()
+    for u in users:
+        try: await bot.send_message(u[0], m.text)
+        except: pass
+    await m.answer("Готово!"); await state.clear()
+
+# --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
+router.message.register(cmd_start, Command("start"))
+router.business_message.register(biz_msg_handler)
+router.business_edited_message.register(biz_msg_handler)
+router.business_deleted_messages.register(biz_delete_handler)
+router.callback_query.register(h_cb, F.data == "help")
+router.callback_query.register(adm_cb, F.data == "admin")
+router.callback_query.register(bc_s, F.data == "bc")
+router.message.register(bc_f, AdminStates.waiting_for_broadcast)
+
+async def main():
+    init_db()
+    dp.include_router(router)
+    Thread(target=run_web).start()
+    print("🚀 БОТ СТАРТОВАЛ!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
