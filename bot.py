@@ -6,10 +6,11 @@ import sqlite3
 from flask import Flask
 from threading import Thread
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Update
+from aiogram.client.default import DefaultBotProperties
 
-# --- КОНФИГ (ПРОВЕРЬ ТОКЕН!) ---
-TOKEN = "8758417597:AAGJgDZWLjjfsF0YL9hHQDLCGkcgOVO5Q1o"
+# --- КОНФИГ ---
+# ВСТАВЬ СЮДА НОВЫЙ ТОКЕН ИЗ BOTFATHER!
+TOKEN = "8758417597:AAGehESdxFCGN4SWZAROc4SFTL1-nlQPDBw"
 ADMIN_ID = 6451702799 
 
 # --- БАЗА ДАННЫХ ---
@@ -20,72 +21,62 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- СЕРВЕР ---
+# --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
-def home(): return "PeerSpy Professional Is Running"
+def home(): return "PeerSpy v6.0: System Online"
 
 def run_web():
     app.run(host='0.0.0.0', port=os.environ.get("PORT", 8080))
 
-# --- ЯДРО БОТА ---
-bot = Bot(token=TOKEN)
+# --- ЯДРО ---
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 @dp.update()
-async def process_update(update: Update):
+async def on_update(update: types.Update):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
-    
     try:
-        # 1. ОБРАБОТКА БИЗНЕС-СООБЩЕНИЙ (НОВЫЕ И ПРАВКИ)
-        biz_msg = update.business_message or update.edited_business_message
-        
-        if biz_msg:
-            m_id = str(biz_msg.message_id)
-            txt = biz_msg.text or biz_msg.caption or "[Медиа]"
+        # ПЕРЕХВАТ БИЗНЕС-ЛОГИКИ
+        msg = update.business_message or update.edited_business_message
+        if msg:
+            m_id = str(msg.message_id)
+            txt = msg.text or msg.caption or "[Медиа]"
             
-            # Проверка на правку
             cur.execute("SELECT text FROM messages WHERE msg_id=?", (m_id,))
             old = cur.fetchone()
             if old and old[0] != txt:
-                await bot.send_message(ADMIN_ID, f"✏️ <b>ИЗМЕНЕНО</b>\n───\n<b>Было:</b> {old[0]}\n<b>Стало:</b> {txt}", parse_mode="HTML")
+                await bot.send_message(ADMIN_ID, f"📝 <b>ИЗМЕНЕНО</b>\n───\n<b>Было:</b> {old[0]}\n<b>Стало:</b> {txt}")
             
             cur.execute("INSERT OR REPLACE INTO messages VALUES (?, ?)", (m_id, txt))
             conn.commit()
 
-            # Сохранение фото
-            if biz_msg.photo:
-                f_id = biz_msg.photo[-1].file_id
-                file = await bot.get_file(f_id)
-                photo_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(photo_url) as r:
-                        if r.status == 200:
-                            await bot.send_photo(ADMIN_ID, types.BufferedInputFile(await r.read(), filename="spy.jpg"), caption="📸 <b>Медиа сохранено</b>")
-
-        # 2. ОБРАБОТКА УДАЛЕНИЙ
+        # ПЕРЕХВАТ УДАЛЕНИЙ
         elif update.business_deleted_messages:
             for m_id in update.business_deleted_messages.message_ids:
                 cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(m_id),))
                 res = cur.fetchone()
                 if res:
-                    await bot.send_message(ADMIN_ID, f"🗑 <b>УДАЛЕНО</b>\n───\n{res[0]}", parse_mode="HTML")
+                    await bot.send_message(ADMIN_ID, f"🗑 <b>УДАЛЕНО</b>\n───\n{res[0]}")
 
-        # 3. ОБЫЧНЫЙ СТАРТ
+        # СТАРТ
         elif update.message and update.message.text == "/start":
-            await update.message.answer("🚀 <b>PeerSpy v5.5 Professional</b>\nСистема мониторинга готова.")
+            await update.message.answer("🚀 <b>PeerSpy v6.0 Active!</b>\nКонфликтов больше нет.")
 
     except Exception as e:
-        logging.error(f"Ошибка при обработке: {e}")
+        logging.error(f"Error: {e}")
     finally:
         conn.close()
 
 async def main():
     init_db()
     Thread(target=run_web).start()
-    logging.info("Бот запущен и ожидает обновлений...")
-    # Принудительно запрашиваем ВСЕ типы данных у Telegram
+    
+    # ЭТА СТРОЧКА УБИВАЕТ КОНФЛИКТЫ И ОЧЕРЕДИ
+    await bot.delete_webhook(drop_pending_updates=True) 
+    
+    print("🚀 БОТ ЗАПУСКАЕТСЯ БЕЗ ХВОСТОВ...")
     await dp.start_polling(bot, allowed_updates=["message", "business_message", "edited_business_message", "business_deleted_messages"])
 
 if __name__ == "__main__":
