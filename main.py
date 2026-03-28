@@ -11,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FStore
+from aiogram.fsm.context import FSMContext
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8758417597:AAERQH3jUuduK8syNtCKW8tvHdZXTilJrF8"
@@ -48,9 +48,8 @@ def run_web():
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Состояния для рассылки (на будущее)
 class AdminStates(StatesGroup):
-    waiting_for_broadcast_text = State()
+    waiting_for_broadcast = State()
 
 def main_menu(user_id):
     builder = InlineKeyboardBuilder()
@@ -63,48 +62,51 @@ def main_menu(user_id):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     add_user(message.from_user.id, message.from_user.username)
-    welcome_text = (
-        f"🚀 <b>PeerSpy v3.0</b>\n\n"
-        "Система тотального контроля бизнес-чатов активна.\n"
-        "• Сохранение фото (ответь на фото любым текстом)\n"
-        "• Лог удаленных сообщений\n"
-        "• История правок"
-    )
-    await message.answer(welcome_text, reply_markup=main_menu(message.from_user.id))
+    await message.answer(f"🚀 <b>PeerSpy v3.1</b> активен.\n\nОтветь на любое фото в бизнес-чате, чтобы спасти его.", reply_markup=main_menu(message.from_user.id))
 
-@dp.callback_query(F.data == "help")
-async def show_help(c: types.CallbackQuery):
-    help_text = (
-        "<b>🛠 ИНСТРУКЦИЯ:</b>\n\n"
-        "1️⃣ Зайдите в <b>Settings</b> -> <b>Telegram Business</b> -> <b>Chat Bots</b>.\n"
-        "2️⃣ Нажмите <b>Add Bot</b> и выберите меня.\n"
-        "3️⃣ Убедитесь, что <b>'Access to messages'</b> включен.\n\n"
-        "📸 <b>Как спасти фото:</b> Просто ответь на одноразовое фото в любом чате любым сообщением (хоть точкой, хоть словом)."
-    )
-    await c.message.answer(help_text)
-    await c.answer()
-
+# --- АДМИНКА ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(c: types.CallbackQuery):
     if c.from_user.id != ADMIN_ID: return
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM users")
-    total_users = cur.fetchone()[0]
+    count = cur.fetchone()[0]
     conn.close()
     
-    admin_text = (
-        "<b>⚙️ ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
-        f"👥 Всего юзеров: <b>{total_users}</b>\n"
-        "📢 Чтобы сделать рассылку, просто напиши мне сообщение."
-    )
-    await c.message.answer(admin_text)
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="📢 Сделать рассылку", callback_data="broadcast"))
+    
+    await c.message.answer(f"<b>⚙️ Админка</b>\n\nЮзеров в базе: <b>{count}</b>", reply_markup=builder.as_markup())
     await c.answer()
 
-# --- УМНЫЙ ПЕРЕХВАТ ---
+@dp.callback_query(F.data == "broadcast")
+async def start_broadcast(c: types.CallbackQuery, state: FSMContext):
+    await c.message.answer("Введите текст для рассылки всем пользователям:")
+    await state.set_state(AdminStates.waiting_for_broadcast)
+    await c.answer()
+
+@dp.message(AdminStates.waiting_for_broadcast)
+async def do_broadcast(message: types.Message, state: FSMContext):
+    conn = sqlite3.connect('bot_data.db')
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users")
+    users = cur.fetchall()
+    conn.close()
+    
+    count = 0
+    for user in users:
+        try:
+            await bot.send_message(user[0], message.text)
+            count += 1
+        except: continue
+    
+    await message.answer(f"✅ Рассылка завершена! Получили: {count} чел.")
+    await state.clear()
+
+# --- ПЕРЕХВАТ ---
 @dp.business_message()
 async def business_handler(message: types.Message):
-    # Логируем в базу
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     msg_text = message.text or message.caption or "[Медиа]"
@@ -113,33 +115,33 @@ async def business_handler(message: types.Message):
     conn.commit()
     conn.close()
 
-    # ЕСЛИ ЭТО ОТВЕТ (REPLY) НА СООБЩЕНИЕ
-    if message.reply_to_message:
-        target = message.reply_to_message
-        # Если в том сообщении, на которое ответили, есть фото
-        if target.photo:
-            f_id = target.photo[-1].file_id
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={f_id}") as resp:
-                    data = await resp.json()
-                    if data.get("ok"):
-                        path = data["result"]["file_path"]
-                        async with session.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}") as f_resp:
-                            content = await f_resp.read()
-                            await bot.send_photo(ADMIN_ID, types.BufferedInputFile(content, filename="saved.jpg"), 
-                                                 caption="🛡 <b>Файл спасен через ответ!</b>")
+    if message.reply_to_message and message.reply_to_message.photo:
+        f_id = message.reply_to_message.photo[-1].file_id
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={f_id}") as resp:
+                data = await resp.json()
+                if data.get("ok"):
+                    path = data["result"]["file_path"]
+                    async with session.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}") as f_resp:
+                        content = await f_resp.read()
+                        await bot.send_photo(ADMIN_ID, types.BufferedInputFile(content, filename="saved.jpg"), 
+                                             caption="🛡 <b>Файл спасен!</b>")
 
-# --- УДАЛЕНИЯ ---
 @dp.business_deleted_messages()
 async def on_delete(event: types.BusinessMessagesDeleted):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     for m_id in event.message_ids:
         cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(m_id),))
-        result = cur.fetchone()
-        if result:
-            await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n<code>{result[0]}</code>")
+        res = cur.fetchone()
+        if res:
+            await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n{res[0]}")
     conn.close()
+
+@dp.callback_query(F.data == "help")
+async def help_cb(c: types.CallbackQuery):
+    await c.message.answer("<b>Как подключить:</b>\n1. Настройки -> Telegram Business -> Чат-боты\n2. Добавь меня и дай доступ к сообщениям.")
+    await c.answer()
 
 async def main():
     init_db()
