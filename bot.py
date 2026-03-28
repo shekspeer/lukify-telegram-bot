@@ -9,7 +9,7 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.types import BusinessMessagesDeleted, InlineKeyboardMarkup, InlineKeyboardButton
 
 # ========== КОНФИГУРАЦИЯ ==========
-TOKEN = "8758417597:AAFXz7gn3xyf7x6HCdSm7hldZX2q6AtAnlk"
+TOKEN = "8758417597:AAEpQYYX7Mu2NTM-9ABAT5gDv3_oxF7H7dY"
 OWNER_ID = 6451702799
 
 logging.basicConfig(level=logging.INFO)
