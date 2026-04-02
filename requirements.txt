@@ -1,2 +1,2 @@
-pyTelegramBotAPI
-aiohttp
+pyTelegramBotAPI>=4.8.0
+aiohttp>=3.9.0
