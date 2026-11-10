@@ -9,6 +9,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from html import escape
 from telebot.async_telebot import AsyncTeleBot
+from telebot.util import extract_command
 from telebot.types import BusinessMessagesDeleted, InlineKeyboardMarkup, InlineKeyboardButton
 from commands import process_command
 
@@ -872,6 +873,22 @@ async def confirm_clear(message):
     await bot.reply_to(message, "✅ Все сообщения удалены.", reply_markup=admin_keyboard())
 
 # ========== ОБРАБОТЧИК ВВОДА ОТ АДМИНА ==========
+@bot.message_handler(commands=['cancel'])
+async def cancel_admin_input(message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS or not get_state(user_id):
+        return
+    set_state(user_id, None)
+    user_giveaway_data.pop(user_id, None)
+    await bot.send_message(message.chat.id, "❌ Отменено.", reply_markup=admin_keyboard())
+
+@bot.message_handler(commands=['skip'])
+async def skip_ad_url(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if get_state(message.from_user.id) == "waiting_ad_url":
+        await handle_admin_input(message)
+
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document'], func=lambda msg: msg.text is None or not msg.text.startswith('/'))
 async def handle_admin_input(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -948,7 +965,7 @@ async def handle_admin_input(message):
             set_state(message.from_user.id, None)
             return
         url = None
-        if message.text.strip() != "/skip":
+        if extract_command(message.text) != "skip":
             url = message.text.strip()
         new_id = add_ad(ad_text, url)
         await bot.send_message(message.chat.id, f"✅ Рекламный блок добавлен. ID: {new_id}")
@@ -956,9 +973,6 @@ async def handle_admin_input(message):
             del user_giveaway_data[message.from_user.id]
         set_state(message.from_user.id, None)
         await bot.send_message(message.chat.id, "🔐 Админ-панель", reply_markup=admin_keyboard(), parse_mode="HTML")
-    elif state == "waiting_ad_url" and message.text and message.text.startswith('/'):
-        set_state(message.from_user.id, None)
-        await bot.send_message(message.chat.id, "❌ Добавление отменено.")
     elif state == "waiting_ad_delete_id" and message.text:
         try:
             ad_id = int(message.text.strip())
@@ -1056,6 +1070,9 @@ async def start_command(message):
         )
         return
 
+    await send_welcome(message.chat.id)
+
+async def send_welcome(chat_id):
     welcome_photo = get_setting("welcome_photo")
     welcome_text = get_setting("welcome_text")
     channel_link = get_setting("channel_link")
@@ -1076,14 +1093,14 @@ async def start_command(message):
     if welcome_photo:
         try:
             await bot.send_photo(
-                message.chat.id, 
+                chat_id,
                 welcome_photo, 
                 caption=welcome_text or f"Добро пожаловать!\n\n<b>Username бота:</b> @{bot_username}",
                 reply_markup=keyboard
             )
         except Exception:
             await bot.send_message(
-                message.chat.id, 
+                chat_id,
                 welcome_text or f"Добро пожаловать! Я бот для сохранения бизнес-сообщений.\n\n<b>Username бота:</b> @{bot_username}", 
                 reply_markup=keyboard,
                 parse_mode="HTML"
@@ -1091,7 +1108,7 @@ async def start_command(message):
     else:
         default_text = f"Добро пожаловать! Я бот для сохранения бизнес-сообщений.\n\n<b>Username бота:</b> @{bot_username}\n\nНажмите кнопку ниже, чтобы скопировать username и добавить меня в свой бизнес-аккаунт."
         await bot.send_message(
-            message.chat.id, 
+            chat_id,
             welcome_text or default_text, 
             reply_markup=keyboard,
             parse_mode="HTML"
@@ -1105,12 +1122,14 @@ async def check_subscription_callback(call):
     if not required_channel:
         await bot.answer_callback_query(call.id, "Канал не задан", show_alert=True)
         return
-    await asyncio.sleep(2)
     if await is_subscribed(user_id, required_channel):
         add_subscription_event(user_id, "subscribe")
-        await bot.delete_message(call.message.chat.id, call.message.message_id)
-        await start_command(call.message)
         await bot.answer_callback_query(call.id, "✅ Доступ открыт!", show_alert=True)
+        await send_welcome(call.message.chat.id)
+        try:
+            await bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить приглашение подписаться: {e}")
     else:
         await bot.answer_callback_query(call.id, "❌ Вы ещё не подписаны", show_alert=True)
 
@@ -1149,7 +1168,9 @@ async def copy_username_callback(call):
 # ========== ЗАПУСК ==========
 async def main():
     print("Бот запущен.")
-    asyncio.create_task(cleanup_old_files()) 
+    asyncio.create_task(cleanup_old_files())
+    await bot.infinity_polling(
+        allowed_updates=[
             "business_message",
             "edited_business_message",
             "deleted_business_messages",
