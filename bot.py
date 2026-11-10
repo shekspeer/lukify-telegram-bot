@@ -1149,7 +1149,9 @@ async def copy_username_callback(call):
 # ========== ЗАПУСК ==========
 async def main():
     print("Бот запущен.")
-    asyncio.create_task(cleanup_old_files()) 
+    asyncio.create_task(cleanup_old_files())
+    await bot.infinity_polling(
+        allowed_updates=[
             "business_message",
             "edited_business_message",
             "deleted_business_messages",
